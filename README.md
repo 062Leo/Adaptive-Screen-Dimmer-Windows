@@ -1,7 +1,5 @@
 # Adaptive-Screen-Dimmer-Windows-
 
-![Demo](https://via.placeholder.com/600x400?text=Screen+Dimmer+Demo)
-
 Automatically dims your screen when it detects bright content to prevent eye strain and flash blindness.
 
 ## Features
