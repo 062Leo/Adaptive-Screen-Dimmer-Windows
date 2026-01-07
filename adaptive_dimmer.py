@@ -128,8 +128,8 @@ class AdaptiveDimmer:
             
             try:
                 win32gui.RegisterClass(wndClass)
-            except Exception as e:
-                # Class likely already registered, which is fine
+            except Exception:
+                # Class likely already registered, which is expected on subsequent calls
                 pass
             
             try:
@@ -445,6 +445,7 @@ class DimmerGUI:
             elif mode == MODE_LABELS[MODE_BOTH]:
                 new_monitors = [1, 2]
             else:
+                self.add_log(f"⚠️ Unbekannter Modus: {mode}")
                 return
             
             old_monitors = self.dimmer.active_monitors
