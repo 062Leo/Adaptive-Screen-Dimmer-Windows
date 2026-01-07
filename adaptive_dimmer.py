@@ -9,8 +9,6 @@ import ctypes
 import threading
 import tkinter as tk
 from tkinter import scrolledtext, ttk
-import logging
-from io import StringIO
 from datetime import datetime
 
 # Parameters
@@ -19,22 +17,17 @@ THRESHOLD_MAX = 100
 MAX_OPACITY = 240
 CHECK_INTERVAL = 0.05
 
-class LogCapture:
-    """Captures log messages and sends them to GUI"""
-    def __init__(self, text_widget):
-        self.text_widget = text_widget
-        self.text_widget.config(state=tk.DISABLED)
-    
-    def write(self, message):
-        if message.strip():
-            self.text_widget.config(state=tk.NORMAL)
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            self.text_widget.insert(tk.END, f"[{timestamp}] {message}\n")
-            self.text_widget.see(tk.END)
-            self.text_widget.config(state=tk.DISABLED)
-    
-    def flush(self):
-        pass
+# Monitor mode constants
+MODE_MONITOR_1 = "monitor_1"
+MODE_MONITOR_2 = "monitor_2"
+MODE_BOTH = "both"
+
+# UI text constants for modes
+MODE_LABELS = {
+    MODE_MONITOR_1: "Nur Monitor 1",
+    MODE_MONITOR_2: "Nur Monitor 2",
+    MODE_BOTH: "Beide Bildschirme"
+}
 
 class AdaptiveDimmer:
     def __init__(self, gui=None):
@@ -76,20 +69,21 @@ class AdaptiveDimmer:
         try:
             opacity = max(0, min(255, int(opacity)))
             
-            if force_immediate:
-                self.current_opacity[monitor_id] = opacity
-            elif abs(self.current_opacity.get(monitor_id, 0) - opacity) > 1:
-                self.current_opacity[monitor_id] = self.current_opacity.get(monitor_id, 0) + (opacity - self.current_opacity.get(monitor_id, 0)) * 0.3
-            else:
-                self.current_opacity[monitor_id] = opacity
-            
-            if monitor_id in self.hwnds and self.hwnds[monitor_id]:
-                win32gui.SetLayeredWindowAttributes(
-                    self.hwnds[monitor_id], 
-                    0,
-                    int(self.current_opacity[monitor_id]), 
-                    win32con.LWA_ALPHA
-                )
+            with self.monitor_lock:
+                if force_immediate:
+                    self.current_opacity[monitor_id] = opacity
+                elif abs(self.current_opacity.get(monitor_id, 0) - opacity) > 1:
+                    self.current_opacity[monitor_id] = self.current_opacity.get(monitor_id, 0) + (opacity - self.current_opacity.get(monitor_id, 0)) * 0.3
+                else:
+                    self.current_opacity[monitor_id] = opacity
+                
+                if monitor_id in self.hwnds and self.hwnds[monitor_id]:
+                    win32gui.SetLayeredWindowAttributes(
+                        self.hwnds[monitor_id], 
+                        0,
+                        int(self.current_opacity[monitor_id]), 
+                        win32con.LWA_ALPHA
+                    )
         except Exception as e:
             self.log(f"Error setting opacity: {e}")
 
@@ -110,15 +104,17 @@ class AdaptiveDimmer:
                     win32gui.EndPaint(hwnd, ps)
                     return 0
                 elif msg == win32con.WM_DESTROY:
-                    if not self.switching_monitor:
-                        if monitor_id in self.hwnds:
-                            del self.hwnds[monitor_id]
+                    with self.monitor_lock:
+                        if not self.switching_monitor:
+                            if monitor_id in self.hwnds:
+                                del self.hwnds[monitor_id]
                     return 0
                 elif msg == win32con.WM_ERASEBKGND:
                     return 1
                 elif msg == win32con.WM_CLOSE:
-                    if not self.switching_monitor and monitor_id in self.hwnds:
-                        del self.hwnds[monitor_id]
+                    with self.monitor_lock:
+                        if not self.switching_monitor and monitor_id in self.hwnds:
+                            del self.hwnds[monitor_id]
                     win32gui.DestroyWindow(hwnd)
                     return 0
                 return win32gui.DefWindowProc(hwnd, msg, wp, lp)
@@ -132,7 +128,8 @@ class AdaptiveDimmer:
             
             try:
                 win32gui.RegisterClass(wndClass)
-            except:
+            except Exception:
+                # Class likely already registered, which is expected on subsequent calls
                 pass
             
             try:
@@ -156,8 +153,8 @@ class AdaptiveDimmer:
             if monitor_id in self.hwnds and self.hwnds[monitor_id]:
                 try:
                     win32gui.DestroyWindow(self.hwnds[monitor_id])
-                except:
-                    pass
+                except Exception as e:
+                    self.log(f"Fehler beim Schließen des alten Overlays für Monitor {monitor_id}: {e}")
                 self.hwnds[monitor_id] = None
             
             hwnd = win32gui.CreateWindowEx(
@@ -168,8 +165,8 @@ class AdaptiveDimmer:
                 className,
                 "",
                 win32con.WS_POPUP | win32con.WS_VISIBLE,
-                monitor_left - 1, monitor_top - 1,
-                screen_width + 2, screen_height + 2,
+                monitor_left, monitor_top,
+                screen_width, screen_height,
                 None, None, hinst, None
             )
             
@@ -187,12 +184,11 @@ class AdaptiveDimmer:
             win32gui.SetWindowPos(
                 hwnd,
                 win32con.HWND_TOPMOST,
-                monitor_left - 1, monitor_top - 1,
-                screen_width + 2, screen_height + 2,
+                monitor_left, monitor_top,
+                screen_width, screen_height,
                 win32con.SWP_NOACTIVATE | win32con.SWP_SHOWWINDOW
             )
             
-            win32gui.MoveWindow(hwnd, monitor_left - 1, monitor_top - 1, screen_width + 2, screen_height + 2, True)
             self.log(f"Overlay erstellt für Monitor {monitor_id}: {screen_width}x{screen_height} @ ({monitor_left},{monitor_top})")
             
         except Exception as e:
@@ -201,6 +197,7 @@ class AdaptiveDimmer:
     def monitor_loop(self):
         """Main loop for brightness monitoring"""
         last_print = time.time()
+        brightness_cache = {}
         
         try:
             while self.running:
@@ -209,11 +206,16 @@ class AdaptiveDimmer:
                     continue
                 
                 with self.monitor_lock:
+                    # Check running flag again inside the lock to ensure thread-safe termination
                     if not self.running:
                         break
                     
+                    # Clear brightness cache for this iteration
+                    brightness_cache.clear()
+                    
                     for monitor_id in self.active_monitors:
                         brightness = self.measure_brightness(monitor_id)
+                        brightness_cache[monitor_id] = brightness
                         
                         if brightness > THRESHOLD_MAX:
                             self.target_opacity[monitor_id] = MAX_OPACITY
@@ -227,12 +229,12 @@ class AdaptiveDimmer:
                 
                 if time.time() - last_print >= 2.0:
                     for monitor_id in self.active_monitors:
-                        brightness = self.measure_brightness(monitor_id)
+                        brightness = brightness_cache.get(monitor_id, 0)
                         opacity = self.current_opacity.get(monitor_id, 0)
                         status = "🔴 AKTIV" if self.target_opacity.get(monitor_id, 0) > 5 else "⚫ AUS"
                         self.log(f"Monitor {monitor_id}: {status} | Helligkeit: {brightness:.1f} | Abdunkelung: {opacity:.1f}/255")
                     if self.gui:
-                        brightness = self.measure_brightness(self.active_monitors[0])
+                        brightness = brightness_cache.get(self.active_monitors[0], 0)
                         opacity = self.current_opacity.get(self.active_monitors[0], 0)
                         self.gui.update_status(f"Helligkeit: {brightness:.1f}", opacity)
                     last_print = time.time()
@@ -280,8 +282,8 @@ class AdaptiveDimmer:
                 if self.hwnds[monitor_id]:
                     try:
                         win32gui.DestroyWindow(self.hwnds[monitor_id])
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.log(f"Fehler beim Schließen des Overlays für Monitor {monitor_id}: {e}")
             self.log("✓ Overlay geschlossen")
 
 
@@ -328,12 +330,12 @@ class DimmerGUI:
         )
         monitor_label.pack(side=tk.LEFT, padx=5, pady=5)
         
-        self.mode_var = tk.StringVar(value="Nur Monitor 1")
-        self.mode_modes = ["Nur Monitor 1", "Nur Monitor 2", "Beide Bildschirme"]
+        self.mode_var = tk.StringVar(value=MODE_LABELS[MODE_MONITOR_1])
+        self.mode_values = [MODE_LABELS[MODE_MONITOR_1], MODE_LABELS[MODE_MONITOR_2], MODE_LABELS[MODE_BOTH]]
         self.mode_combo = ttk.Combobox(
             monitor_frame,
             textvariable=self.mode_var,
-            values=self.mode_modes,
+            values=self.mode_values,
             state="readonly",
             width=30
         )
@@ -412,30 +414,40 @@ class DimmerGUI:
         self.root.after(500, self.auto_start)
         
     def add_log(self, message):
-        """Add message to log"""
-        self.log_text.config(state=tk.NORMAL)
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
-        self.log_text.see(tk.END)
-        self.log_text.config(state=tk.DISABLED)
+        """Add message to log - thread-safe"""
+        def _add_log():
+            self.log_text.config(state=tk.NORMAL)
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+            self.log_text.see(tk.END)
+            self.log_text.config(state=tk.DISABLED)
+        
+        self.root.after(0, _add_log)
     
     def update_status(self, brightness_text, opacity):
-        """Update status label"""
-        opacity_pct = (opacity / 255) * 100
-        pause_info = " (⏸ PAUSIERT)" if self.dimmer and self.dimmer.paused else ""
-        self.status_label.config(text=f"{brightness_text} | Abdunkelung: {opacity_pct:.0f}%{pause_info}")
+        """Update status label - thread-safe"""
+        def _update_status():
+            opacity_pct = (opacity / 255) * 100
+            pause_info = " (⏸ PAUSIERT)" if self.dimmer and self.dimmer.paused else ""
+            self.status_label.config(text=f"{brightness_text} | Abdunkelung: {opacity_pct:.0f}%{pause_info}")
+        
+        self.root.after(0, _update_status)
     
     def on_mode_change(self, event=None):
         """Handle mode selection change"""
         if self.active and self.dimmer:
             mode = self.mode_var.get()
             
-            if mode == "Nur Monitor 1":
+            # Map UI text to monitor IDs
+            if mode == MODE_LABELS[MODE_MONITOR_1]:
                 new_monitors = [1]
-            elif mode == "Nur Monitor 2":
+            elif mode == MODE_LABELS[MODE_MONITOR_2]:
                 new_monitors = [2]
-            else:
+            elif mode == MODE_LABELS[MODE_BOTH]:
                 new_monitors = [1, 2]
+            else:
+                self.add_log(f"⚠️ Unbekannter Modus: {mode}")
+                return
             
             old_monitors = self.dimmer.active_monitors
             
@@ -461,6 +473,7 @@ class DimmerGUI:
                             except Exception as e:
                                 self.add_log(f"Fehler beim Löschen des Overlays für Monitor {monitor_id}: {e}")
                     
+                    # Small delay to ensure windows are fully destroyed before creating new ones
                     time.sleep(0.1)
                     
                     for monitor_id in new_monitors:
@@ -476,30 +489,40 @@ class DimmerGUI:
     
     def auto_start(self):
         """Auto-start the dimmer on startup"""
-        self.add_log("Auto-Start: Abdunkler wird gestartet...")
-        mode = self.mode_var.get()
-        
-        if mode == "Nur Monitor 1":
-            active_monitors = [1]
-        elif mode == "Nur Monitor 2":
-            active_monitors = [2]
-        else:
-            active_monitors = [1, 2]
-        
-        self.add_log(f"Starte Abdunkler für Bildschirme: {active_monitors}...")
-        self.active = True
-        
-        self.dimmer = AdaptiveDimmer(gui=self)
-        self.dimmer.active_monitors = active_monitors
-        
-        self.dimmer_thread = threading.Thread(target=self.dimmer.run, daemon=True)
-        self.dimmer_thread.start()
-        
-        self.pause_button.config(state=tk.NORMAL)
-        self.resume_button.config(state=tk.DISABLED)
-        self.mode_combo.config(state="readonly")
-        self.status_label.config(text="🔴 LÄUFT", fg="#00ff00")
-        self.add_log("✓ Abdunkler gestartet!")
+        try:
+            self.add_log("Auto-Start: Abdunkler wird gestartet...")
+            mode = self.mode_var.get()
+            
+            # Map UI text to monitor IDs
+            if mode == MODE_LABELS[MODE_MONITOR_1]:
+                active_monitors = [1]
+            elif mode == MODE_LABELS[MODE_MONITOR_2]:
+                active_monitors = [2]
+            elif mode == MODE_LABELS[MODE_BOTH]:
+                active_monitors = [1, 2]
+            else:
+                self.add_log(f"⚠️ Unbekannter Modus '{mode}', verwende Monitor 1 als Standard")
+                active_monitors = [1]
+            
+            self.add_log(f"Starte Abdunkler für Bildschirme: {active_monitors}...")
+            self.active = True
+            
+            self.dimmer = AdaptiveDimmer(gui=self)
+            self.dimmer.active_monitors = active_monitors
+            
+            self.dimmer_thread = threading.Thread(target=self.dimmer.run, daemon=True)
+            self.dimmer_thread.start()
+            
+            self.pause_button.config(state=tk.NORMAL)
+            self.resume_button.config(state=tk.DISABLED)
+            self.mode_combo.config(state="readonly")
+            self.status_label.config(text="🔴 LÄUFT", fg="#00ff00")
+            self.add_log("✓ Abdunkler gestartet!")
+        except Exception as e:
+            self.add_log(f"❌ Fehler beim Starten des Abdunklers: {e}")
+            self.status_label.config(text="❌ FEHLER", fg="#ff0000")
+            self.pause_button.config(state=tk.DISABLED)
+            self.resume_button.config(state=tk.DISABLED)
     
     def pause_dimmer(self):
         """Pause the dimmer"""
@@ -537,8 +560,8 @@ class DimmerGUI:
                 if hwnd:
                     try:
                         win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
-                    except:
-                        pass
+                    except Exception as e:
+                        self.add_log(f"Fehler beim Schließen des Fensters: {e}")
         
         if self.dimmer_thread and self.dimmer_thread.is_alive():
             self.dimmer_thread.join(timeout=2)
@@ -547,7 +570,6 @@ class DimmerGUI:
 
 
 def main():
-    print("🔍 DEBUG: main() started")
     try:
         try:
             ctypes.windll.user32.SetProcessDPIAware()
@@ -557,16 +579,12 @@ def main():
         if not is_admin:
             print("⚠️  WARNUNG: Programm läuft nicht als Administrator")
             print("   Falls Probleme auftreten, mit Rechtsklick -> 'Als Administrator ausführen'\n")
-    except:
+    except Exception:
         pass
     
-    print("🔍 DEBUG: Creating DimmerGUI...")
     try:
         gui = DimmerGUI()
-        print("🔍 DEBUG: DimmerGUI created successfully")
-        print("🔍 DEBUG: Starting mainloop...")
         gui.root.mainloop()
-        print("🔍 DEBUG: mainloop ended")
     except Exception as e:
         print(f"❌ ERROR in GUI creation: {e}")
         import traceback
