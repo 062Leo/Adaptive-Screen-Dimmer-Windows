@@ -4,7 +4,7 @@ Automatically dims your screen when it detects bright content to prevent eye str
 
 ## Features
 - 🛡️ **Eye Protection**: Reduces eye strain from bright screens
-- 🖥️ **GUI Interface**: Benutzerfreundliches Kontrollpanel (Englisch/Deutsch)
+- 🖥️ **GUI Interface**: User-friendly control panel with German UI
 - 📊 **Live Logs**: View brightness and dimming levels in real-time
 - 🖲️ **Multi-Monitor Support**: Choose which monitor to dim
 - ⚙️ **Auto-Adjusting**: Dynamically adjusts dimming based on screen brightness
@@ -13,23 +13,32 @@ Automatically dims your screen when it detects bright content to prevent eye str
 
 ## Installation
 1. Clone this repository or download the .py and .bat File
-2. Install requirements:
+2. Create a virtual environment:
    ```
+   python -m venv .venv
+   ```
+3. Activate the virtual environment and install requirements:
+   ```
+   .venv\Scripts\activate
    pip install mss numpy pywin32
    ```
-3. Run the application:
+4. Run the application:
    ```
    adaptive_dimmer_START.bat
    ```
 
+**Note:** The batch file uses `.venv\Scripts\pythonw.exe`. Make sure you have created the virtual environment as described above.
+
 ## Usage
 1. **Start Program**: Double-click `adaptive_dimmer_START.bat`
 2. **GUI Window Opens**: A control panel appears with:
-   - **Bildschirm Auswahl**: Select which monitor to dim (for multi-monitor setups)
+   - **Bildschirm Modus** (Screen Mode): Select which monitor to dim (for multi-monitor setups)
    - **Status**: Current brightness and dimming level
    - **Logs**: Real-time log output from the dimmer
-   - **START Button**: Begin automatic dimming
-   - **STOP Button**: Stop dimming and hide overlay
+   - **PAUSIEREN Button** (Pause): Temporarily pause automatic dimming
+   - **FORTSETZEN Button** (Resume): Resume automatic dimming after pausing
+3. **Auto-Start**: The dimmer starts automatically when the GUI opens
+4. **Close**: Close the window to stop the dimmer
 
 ## Configuration
 Modify these parameters in `adaptive_dimmer.py`:
@@ -52,13 +61,14 @@ Tired of being flashed by bright screens while watching videos or browsing? This
 
 ## How It Works
 1. GUI opens with control panel
-2. Select target monitor
-3. Press START to begin monitoring
+2. Select target monitor (Bildschirm Modus)
+3. Dimmer starts automatically
 4. Measures average screen brightness every 50ms
 5. Calculates needed dimming based on your thresholds
 6. Creates a transparent overlay that darkens the screen
 7. Adjusts in real-time as content changes
 8. Logs all activity in the GUI window
+9. Use PAUSIEREN/FORTSETZEN buttons to control dimming
 
 ## Requirements
 - Windows 7+
